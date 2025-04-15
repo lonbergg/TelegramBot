@@ -1,0 +1,13 @@
+# Ignore environment file
+.env
+
+# Ignore virtual environment (на всякий случай)
+.venv/
+
+# Ignore Excel files (если не хочешь их пушить)
+*.xlsx
+
+# Bytecode & __pycache__
+__pycache__/
+*.py[cod]
+.idea/
