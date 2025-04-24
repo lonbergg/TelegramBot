@@ -51,10 +51,12 @@ last_message_times = {}
 broadcast_buffer = {}
 SPAM_INTERVAL = timedelta(seconds=5)
 
+
 # Функція для запланованої розсилки
 def schedule_broadcast(content: str):
     for aid in ADMIN_IDS:
         asyncio.create_task(bot.send_message(aid, content))
+
 
 # Функція для сповіщення адміністраторів про помилки
 async def notify_admins(text: str):
@@ -63,6 +65,7 @@ async def notify_admins(text: str):
             await bot.send_message(aid, text)
         except Exception:
             pass
+
 
 # Ініціалізація файлів Excel
 if not os.path.exists(EXCEL_FILE):
@@ -79,6 +82,7 @@ if not os.path.exists(LOG_FILE):
     ws.append(["Дата", "Повідомлення", "Успішно", "Не вдалося"])
     wb.save(LOG_FILE)
 
+
 # Функції для роботи з БД та Excel
 def export_db_to_excel(pool):
     async def inner():
@@ -90,6 +94,7 @@ def export_db_to_excel(pool):
             df.to_excel(filename, index=False)
             return filename
     return inner
+
 
 def save_participant(user: types.User, nickname: str, email: str):
     if user.id in participants_set:
@@ -112,6 +117,7 @@ def save_participant(user: types.User, nickname: str, email: str):
     participants_set.add(user.id)
     return True
 
+
 async def save_participant_to_db(pool, user: types.User, nickname: str, email: str):
     async with pool.acquire() as conn:
         await conn.execute(
@@ -128,6 +134,22 @@ async def save_participant_to_db(pool, user: types.User, nickname: str, email: s
             email
         )
 
+
+# ─── ЛОГУВАННЯ РОЗСИЛОК ─────────────────────────────────────────────────────
+async def log_broadcast(pool, message_text: str, success_count: int, failed_list: list[int]):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO broadcast_logs (date, message, success_count, failed_ids)
+            VALUES ($1, $2, $3, $4)
+            """,
+            datetime.now(),
+            message_text,
+            success_count,
+            ", ".join(map(str, failed_list))
+        )
+
+
 # Формування клавіатур
 def user_menu(is_admin: bool = False):
     buttons = [
@@ -140,6 +162,7 @@ def user_menu(is_admin: bool = False):
         buttons.append([KeyboardButton(text="🔐 Admin panel")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, input_field_placeholder="Оберіть опцію")
 
+
 def support_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -150,6 +173,7 @@ def support_menu():
         resize_keyboard=True
     )
 
+
 def admin_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -157,10 +181,12 @@ def admin_menu():
             [KeyboardButton(text="📤 Список з бази PostgreSQL")],
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📣 Розсилка")],
             [KeyboardButton(text="🕒 Планувати розсилку"), KeyboardButton(text="⛔ Забанені")],
+            [KeyboardButton(text="🗑️ Видалити учасника")],  # нова кнопка
             [KeyboardButton(text="↩️ Повернутись")],
         ],
         resize_keyboard=True
     )
+
 
 # Хендлер /start
 @router.message(Command("start"))
@@ -168,9 +194,12 @@ async def welcome_user(message: Message):
     if message.from_user.id in banned_users:
         return
     await message.answer(
-        "👋 Вітаємо у GGpoker Telegram боті! Це не просто бот для участі в розіграші, а також ваш персональний асистент для отримання новин, бонусів та корисної інформації про GGpoker. Натисніть кнопку нижче, щоб розпочати.",
+        "👋 Вітаємо у GGpoker Telegram боті! Це не просто бот для участі в розіграші, "
+        "а також ваш персональний асистент для отримання новин, бонусів та корисної інформації "
+        "про GGpoker. Натисніть кнопку нижче, щоб розпочати.",
         reply_markup=user_menu(message.from_user.id in ADMIN_IDS)
     )
+
 
 # Участь у розігарші
 @router.message(F.text == "🎉 Взяти участь у розігарші")
@@ -190,6 +219,7 @@ async def participate_command(message: Message):
         "Після цього натисніть кнопку нижче, щоб продовжити.",
         reply_markup=kb
     )
+
 
 # Перевірка підписки
 @router.callback_query(F.data == "participate")
@@ -213,6 +243,7 @@ async def check_subscription(callback: CallbackQuery):
     await callback.message.answer("✅ Ви приєдналися! Введіть ваш GGPoker нікнейм.")
     await callback.answer()
 
+
 # Відкриття адмін‑панелі
 @router.message(F.text == "🔐 Admin panel")
 async def open_admin_panel(message: Message):
@@ -221,27 +252,33 @@ async def open_admin_panel(message: Message):
         return
     await message.answer("🔐 Вхід в адмін‑панель.", reply_markup=admin_menu())
 
+
 # Підтримка
 @router.message(F.text == "📞 Підтримка")
 async def show_support_options(message: Message):
     await message.answer("Оберіть варіант:", reply_markup=support_menu())
 
+
 @router.message(F.text == "✍️ Написати в підтримку")
 async def handle_write_support(message: Message):
     await message.answer(f"Зв'яжіться з підтримкою тут: https://t.me/{SUPPORT_USERNAME.strip('@')}")
+
 
 @router.message(F.text == "🔄 Змінити нікнейм")
 async def handle_change_nickname(message: Message):
     user_states[message.from_user.id] = "awaiting_new_nickname"
     await message.answer("Введіть новий нікнейм для заміни:")
 
+
 @router.message(F.text == "🚫 Поскаржитись")
 async def handle_complaint(message: Message):
     await message.answer("😔 Якщо у вас є скарга — зверніться до адміністратора.")
 
+
 @router.message(F.text == "↩️ Назад до меню")
 async def back_to_main_menu(message: Message):
     await message.answer("🔙 Повертаємося до головного меню:", reply_markup=user_menu(message.from_user.id in ADMIN_IDS))
+
 
 # Підтвердження участі
 @router.callback_query(F.data == "confirm_participation")
@@ -251,29 +288,26 @@ async def confirm_participation(callback: CallbackQuery):
     if not state or not isinstance(state, dict):
         await callback.answer("⚠️ Щось пішло не так. Спробуйте ще.")
         return
-    try:
-        nickname = state["nickname"]
-        email = state["email"]
-        if save_participant(callback.from_user, nickname, email):
-            await save_participant_to_db(dp['db'], callback.from_user, nickname, email)
-            await callback.message.answer(
-                "✅ Участь підтверджено! Успіхів!",
-                reply_markup=user_menu(user_id in ADMIN_IDS)
-            )
-        else:
-            banned_users.add(user_id)
-            await callback.message.answer("🚫 Ви вже брали участь або намагалися обдурити бота.")
-    except Exception as e:
-        await notify_admins(f"❌ Помилка при підтвердженні участі:\n{e}")
-    finally:
-        user_states.pop(user_id, None)
-        await callback.answer()
+    nickname = state["nickname"]
+    email = state["email"]
+    if save_participant(callback.from_user, nickname, email):
+        await save_participant_to_db(dp['db'], callback.from_user, nickname, email)
+        await callback.message.answer(
+            "✅ Участь підтверджено! Успіхів!",
+            reply_markup=user_menu(user_id in ADMIN_IDS)
+        )
+    else:
+        banned_users.add(user_id)
+        await callback.message.answer("🚫 Ви вже брали участь або намагалися обдурити бота.")
+    user_states.pop(user_id, None)
+    await callback.answer()
+
 
 # Обробка повідомлень та адмін-розсилки
 @router.message()
 async def handle_messages(message: Message):
     user_id = message.from_user.id
-    text = message.text
+    text = message.text or ""
     if user_id in banned_users:
         return
 
@@ -303,101 +337,111 @@ async def handle_messages(message: Message):
                     [InlineKeyboardButton(text="✅ Підтверджую участь", callback_data="confirm_participation")]
                 ])
             )
-            user_states[user_id] = {"step": "confirming", "nickname": nickname, "email": email}
+            user_states[user_id] = {"nickname": nickname, "email": email}
             return
 
     # Адмін-команди
-    if text == "📤 Список з бази PostgreSQL" and user_id in ADMIN_IDS:
+    if text == "👥 Учасники" and user_id in ADMIN_IDS:
+        rows = await dp['db'].fetch(
+            "SELECT telegram_id, username, full_name, nickname, email, joined_at FROM participants"
+        )
+        if not rows:
+            await message.answer("👥 Список учасників порожній.")
+        else:
+            info = "\n".join(
+                f"{r['telegram_id']} | {r['username']} | {r['full_name']} | {r['nickname']} | {r['email']}"
+                for r in rows
+            )
+            await message.answer(f"👥 Список учасників:\n{info}")
+        return
+    elif text == "🗑️ Видалити учасника" and user_id in ADMIN_IDS:
+        admin_states[user_id] = "awaiting_delete"
+        await message.answer("🔍 Введіть Telegram ID учасника для видалення:")
+        return
+    elif admin_states.get(user_id) == "awaiting_delete":
+        try:
+            pid = int(text.strip())
+            await dp['db'].execute("DELETE FROM participants WHERE telegram_id = $1", pid)
+            participants_set.discard(pid)
+            wb = load_workbook(EXCEL_FILE)
+            ws = wb.active
+            for idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+                if row[0].value == pid:
+                    ws.delete_rows(idx)
+                    break
+            wb.save(EXCEL_FILE)
+            await message.answer(f"🗑️ Учасника з ID {pid} видалено.")
+        except ValueError:
+            await message.answer("❌ Неправильний формат ID. Спробуйте ще раз:")
+            return
+        except Exception as e:
+            await message.answer(f"❌ Помилка видалення: {e}")
+        finally:
+            admin_states.pop(user_id, None)
+        return
+    elif text == "📤 Список з бази PostgreSQL" and user_id in ADMIN_IDS:
         await message.answer("🔄 Експортуємо список...")
         export_func = export_db_to_excel(dp['db'])
         file_path = await export_func()
         await message.answer_document(FSInputFile(file_path))
         return
-
-    # Основне меню
-    if text == "📜 Умови":
-        await message.answer(
-            f"📜 Умови:\n1. Підписка на {CHANNEL_USERNAME}\n2. YouTube: {YOUTUBE_LINK}\n3. Twitch: {TWITCH_LINK}",
-            reply_markup=user_menu(user_id in ADMIN_IDS)
-        )
-    elif text == "🎁 Призи":
-        await message.answer(
-            "🎁 Призовий фонд: бонуси для 3 учасників!",
-            reply_markup=user_menu(user_id in ADMIN_IDS)
-        )
-    elif text == "📍 Мій статус":
-        status = "✅ Ви берете участь!" if user_id in participants_set else "❌ Ви ще не брали участі."
-        await message.answer(status, reply_markup=user_menu(user_id in ADMIN_IDS))
-    elif text == "❓ FAQ":
-        await message.answer(
-            "ℹ️ Часті питання:\n- Як дізнатися чи я зареєстрований?\n- Як змінити нікнейм?\n- Як зв'язатися з підтримкою?",
-            reply_markup=user_menu(user_id in ADMIN_IDS)
-        )
-    elif text == "👥 Учасники" and user_id in ADMIN_IDS:
-        wb = load_workbook(EXCEL_FILE)
-        ws = wb.active
-        info = "\n".join(f"{r[1]} | {r[2]} | {r[4]} | {r[3]}" for r in ws.iter_rows(min_row=2, values_only=True))
-        await message.answer(f"👥 Список учасників:\n{info}")
-    elif text == "📊 Статистика" and user_id in ADMIN_IDS:
-        wb = load_workbook(EXCEL_FILE)
-        ws = wb.active
-        count = ws.max_row - 1
-        await message.answer(f"📊 Зареєстровано учасників: {count}")
-    elif text == "📥 Експорт Excel" and user_id in ADMIN_IDS:
-        await message.answer_document(FSInputFile(EXCEL_FILE))
     elif text == "📣 Розсилка" and user_id in ADMIN_IDS:
         admin_states[user_id] = "awaiting_broadcast"
         await message.answer("✉️ Введіть текст для розсилки.")
+        return
     elif text == "🕒 Планувати розсилку" and user_id in ADMIN_IDS:
         admin_states[user_id] = "awaiting_schedule"
         await message.answer("🕒 Введіть дату, час (YYYY-MM-DD HH:MM) та текст:")
+        return
     elif text == "⛔ Забанені" and user_id in ADMIN_IDS:
         banned_list = "\n".join(map(str, banned_users)) or "✅ Список порожній."
         await message.answer(f"🚫 Забанені:\n{banned_list}")
-    elif text == "↩️ Повернутись":
-        await message.answer("🔙 Повертаємося:", reply_markup=user_menu(user_id in ADMIN_IDS))
-    # Запуск ручної розсилки
-    elif user_id in admin_states and admin_states[user_id] == "awaiting_broadcast":
+        return
+    elif text == "↩️ Повернутись" and user_id in ADMIN_IDS:
+        await message.answer("🔙 Повертаємося до головного меню:", reply_markup=user_menu(True))
+        return
+    # Розсилка
+    if user_id in admin_states and admin_states[user_id] == "awaiting_broadcast":
         broadcast_buffer[user_id] = {"text": text.strip()}
         await confirm_broadcast_manual(user_id)
-        del admin_states[user_id]
-    # Запланована розсилка
-    elif user_id in admin_states and admin_states[user_id] == "awaiting_schedule":
+        admin_states.pop(user_id, None)
+        return
+    if user_id in admin_states and admin_states[user_id] == "awaiting_schedule":
         try:
             date_str, time_str, content = text.split(" ", 2)
             run_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            scheduler.add_job(
-                schedule_broadcast,
-                trigger=DateTrigger(run_date=run_dt),
-                args=[content]
-            )
+            scheduler.add_job(schedule_broadcast, trigger=DateTrigger(run_date=run_dt), args=[content])
             await message.answer(f"🕒 Розсилку заплановано на {run_dt}")
         except Exception as e:
             await message.answer(f"❌ Помилка: {e}")
         finally:
-            del admin_states[user_id]
+            admin_states.pop(user_id, None)
+        return
 
+
+# Оновлена розсилка з логуванням і throttle
 async def confirm_broadcast_manual(user_id: int):
     data = broadcast_buffer.pop(user_id, None)
     if not data:
         await bot.send_message(user_id, "⚠️ Текст не знайдено.")
         return
     msg = data["text"]
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb.active
+    async with dp['db'].acquire() as conn:
+        rows = await conn.fetch("SELECT telegram_id FROM participants")
     count, failed = 0, []
-    for r in ws.iter_rows(min_row=2, values_only=True):
+    for r in rows:
+        tid = r["telegram_id"]
         try:
-            await bot.send_message(r[0], msg)
+            await bot.send_message(tid, msg)
             count += 1
+            await asyncio.sleep(0.05)
         except Exception:
-            failed.append(r[0])
-    log_wb = load_workbook(LOG_FILE)
-    log_ws = log_wb.active
-    log_ws.append([datetime.now().strftime("%Y-%m-%d %H:%M"), msg, count, ", ".join(map(str, failed))])
-    log_wb.save(LOG_FILE)
-    await bot.send_message(user_id, f"✅ Розсилка: {count} успіх, {len(failed)} помилок.")
+            failed.append(tid)
+    await log_broadcast(dp['db'], msg, count, failed)
+    await bot.send_message(user_id, f"✅ Розсилка: {count} успішно, {len(failed)} помилок.")
 
+
+# Main
 async def main():
     pool = await asyncpg.create_pool(
         user=DATABASE_USER,
@@ -407,11 +451,16 @@ async def main():
         port=DATABASE_PORT
     )
     dp['db'] = pool
+    # Ініціалізуємо participants_set із БД для перевірки дублів
+    rows = await pool.fetch("SELECT telegram_id FROM participants")
+    for r in rows:
+        participants_set.add(r['telegram_id'])
+
     dp.include_router(router)
     scheduler.start()
     await dp.start_polling(bot)
 
+
 if __name__ == "__main__":
     asyncio.run(main())
-
 

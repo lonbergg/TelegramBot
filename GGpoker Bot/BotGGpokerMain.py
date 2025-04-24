@@ -3,6 +3,7 @@ import os
 import re
 import asyncio
 import asyncpg
+import redis.asyncio as redis
 import pandas as pd
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, Router, types, F
@@ -19,6 +20,7 @@ from dotenv import load_dotenv
 
 # Завантажуємо змінні оточення
 load_dotenv()
+redis_client = None
 
 API_TOKEN = os.getenv("API_TOKEN")
 # Підтримка кількох адмінів: передаємо через ADMIN_IDS в .env
@@ -52,11 +54,15 @@ broadcast_buffer = {}
 SPAM_INTERVAL = timedelta(seconds=5)
 
 # Функція для запланованої розсилки
+
+
 def schedule_broadcast(content: str):
     for aid in ADMIN_IDS:
         asyncio.create_task(bot.send_message(aid, content))
 
 # Функція для сповіщення адміністраторів про помилки
+
+
 async def notify_admins(text: str):
     for aid in ADMIN_IDS:
         try:
@@ -80,6 +86,8 @@ if not os.path.exists(LOG_FILE):
     wb.save(LOG_FILE)
 
 # Функції для роботи з БД та Excel
+
+
 def export_db_to_excel(pool):
     async def inner():
         async with pool.acquire() as conn:
@@ -90,6 +98,17 @@ def export_db_to_excel(pool):
             df.to_excel(filename, index=False)
             return filename
     return inner
+
+
+async def export_logs_to_excel(pool):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM broadcast_logs")
+        df = pd.DataFrame(rows, columns=["date", "message", "success_count", "failed_ids"])
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        filename = os.path.join(desktop, f"broadcast_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        df.to_excel(filename, index=False)
+        return filename
+
 
 def save_participant(user: types.User, nickname: str, email: str):
     if user.id in participants_set:
@@ -112,6 +131,7 @@ def save_participant(user: types.User, nickname: str, email: str):
     participants_set.add(user.id)
     return True
 
+
 async def save_participant_to_db(pool, user: types.User, nickname: str, email: str):
     async with pool.acquire() as conn:
         await conn.execute(
@@ -128,7 +148,29 @@ async def save_participant_to_db(pool, user: types.User, nickname: str, email: s
             email
         )
 
-# Формування клавіатур
+
+async def has_participated(pool, telegram_id: int) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.fetchval("SELECT 1 FROM participants WHERE telegram_id = $1", telegram_id)
+        return result is not None
+# ─── ЛОГУВАННЯ РОЗСИЛОК ─────────────────────────────────────────────────────
+
+
+async def log_broadcast(pool, message_text: str, success_count: int, failed_list: list[int]):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO broadcast_logs (date, message, success_count, failed_ids)
+            VALUES ($1, $2, $3, $4)
+            """,
+            datetime.now(),
+            message_text,
+            success_count,
+            ", ".join(map(str, failed_list))
+        )
+
+
+#Формування клавіатур
 def user_menu(is_admin: bool = False):
     buttons = [
         [KeyboardButton(text="📜 Умови"), KeyboardButton(text="🎁 Призи")],
@@ -140,6 +182,7 @@ def user_menu(is_admin: bool = False):
         buttons.append([KeyboardButton(text="🔐 Admin panel")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, input_field_placeholder="Оберіть опцію")
 
+
 def support_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -150,6 +193,7 @@ def support_menu():
         resize_keyboard=True
     )
 
+
 def admin_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -157,10 +201,12 @@ def admin_menu():
             [KeyboardButton(text="📤 Список з бази PostgreSQL")],
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📣 Розсилка")],
             [KeyboardButton(text="🕒 Планувати розсилку"), KeyboardButton(text="⛔ Забанені")],
+            [KeyboardButton(text="📊 Експорт логів")],
             [KeyboardButton(text="↩️ Повернутись")],
         ],
         resize_keyboard=True
     )
+
 
 # Хендлер /start
 @router.message(Command("start"))
@@ -171,6 +217,7 @@ async def welcome_user(message: Message):
         "👋 Вітаємо у GGpoker Telegram боті! Це не просто бот для участі в розіграші, а також ваш персональний асистент для отримання новин, бонусів та корисної інформації про GGpoker. Натисніть кнопку нижче, щоб розпочати.",
         reply_markup=user_menu(message.from_user.id in ADMIN_IDS)
     )
+
 
 # Участь у розігарші
 @router.message(F.text == "🎉 Взяти участь у розігарші")
@@ -190,6 +237,7 @@ async def participate_command(message: Message):
         "Після цього натисніть кнопку нижче, щоб продовжити.",
         reply_markup=kb
     )
+
 
 # Перевірка підписки
 @router.callback_query(F.data == "participate")
@@ -213,6 +261,7 @@ async def check_subscription(callback: CallbackQuery):
     await callback.message.answer("✅ Ви приєдналися! Введіть ваш GGPoker нікнейм.")
     await callback.answer()
 
+
 # Відкриття адмін‑панелі
 @router.message(F.text == "🔐 Admin panel")
 async def open_admin_panel(message: Message):
@@ -221,27 +270,33 @@ async def open_admin_panel(message: Message):
         return
     await message.answer("🔐 Вхід в адмін‑панель.", reply_markup=admin_menu())
 
+
 # Підтримка
 @router.message(F.text == "📞 Підтримка")
 async def show_support_options(message: Message):
     await message.answer("Оберіть варіант:", reply_markup=support_menu())
 
+
 @router.message(F.text == "✍️ Написати в підтримку")
 async def handle_write_support(message: Message):
     await message.answer(f"Зв'яжіться з підтримкою тут: https://t.me/{SUPPORT_USERNAME.strip('@')}")
+
 
 @router.message(F.text == "🔄 Змінити нікнейм")
 async def handle_change_nickname(message: Message):
     user_states[message.from_user.id] = "awaiting_new_nickname"
     await message.answer("Введіть новий нікнейм для заміни:")
 
+
 @router.message(F.text == "🚫 Поскаржитись")
 async def handle_complaint(message: Message):
     await message.answer("😔 Якщо у вас є скарга — зверніться до адміністратора.")
 
+
 @router.message(F.text == "↩️ Назад до меню")
 async def back_to_main_menu(message: Message):
     await message.answer("🔙 Повертаємося до головного меню:", reply_markup=user_menu(message.from_user.id in ADMIN_IDS))
+
 
 # Підтвердження участі
 @router.callback_query(F.data == "confirm_participation")
@@ -269,11 +324,15 @@ async def confirm_participation(callback: CallbackQuery):
         user_states.pop(user_id, None)
         await callback.answer()
 
+
 # Обробка повідомлень та адмін-розсилки
 @router.message()
 async def handle_messages(message: Message):
     user_id = message.from_user.id
     text = message.text
+    if await is_flooding(user_id):
+        await message.answer("⏳ Повільніше, будь ласка!")
+        return
     if user_id in banned_users:
         return
 
@@ -314,6 +373,17 @@ async def handle_messages(message: Message):
         await message.answer_document(FSInputFile(file_path))
         return
 
+    elif text == "📊 Експорт логів" and user_id in ADMIN_IDS:
+        path = await export_logs_to_excel(dp['db'])
+        await message.answer_document(FSInputFile(path))
+        return
+
+    elif text == "📜 Умови":
+        await message.answer(
+            f"📜 Умови:\n1. Підписка на {CHANNEL_USERNAME}\n2. YouTube: {YOUTUBE_LINK}\n3. Twitch: {TWITCH_LINK}",
+            reply_markup=user_menu(user_id in ADMIN_IDS)
+        )
+
     # Основне меню
     if text == "📜 Умови":
         await message.answer(
@@ -326,8 +396,10 @@ async def handle_messages(message: Message):
             reply_markup=user_menu(user_id in ADMIN_IDS)
         )
     elif text == "📍 Мій статус":
-        status = "✅ Ви берете участь!" if user_id in participants_set else "❌ Ви ще не брали участі."
+        participated = await has_participated(dp['db'], user_id)
+        status = "✅ Ви берете участь!" if participated else "❌ Ви ще не брали участі."
         await message.answer(status, reply_markup=user_menu(user_id in ADMIN_IDS))
+
     elif text == "❓ FAQ":
         await message.answer(
             "ℹ️ Часті питання:\n- Як дізнатися чи я зареєстрований?\n- Як змінити нікнейм?\n- Як зв'язатися з підтримкою?",
@@ -355,6 +427,7 @@ async def handle_messages(message: Message):
         banned_list = "\n".join(map(str, banned_users)) or "✅ Список порожній."
         await message.answer(f"🚫 Забанені:\n{banned_list}")
     elif text == "↩️ Повернутись":
+        admin_states.pop(user_id, None)  # сбросим состояние, если что-то активное
         await message.answer("🔙 Повертаємося:", reply_markup=user_menu(user_id in ADMIN_IDS))
     # Запуск ручної розсилки
     elif user_id in admin_states and admin_states[user_id] == "awaiting_broadcast":
@@ -377,27 +450,40 @@ async def handle_messages(message: Message):
         finally:
             del admin_states[user_id]
 
+
+@router.message(F.text == "📊 Експорт логів")
+async def export_logs(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("🔄 Експорт логів...")
+    path = await export_logs_to_excel(dp['db'])
+    await message.answer_document(FSInputFile(path))
+
+
 async def confirm_broadcast_manual(user_id: int):
     data = broadcast_buffer.pop(user_id, None)
     if not data:
         await bot.send_message(user_id, "⚠️ Текст не знайдено.")
         return
     msg = data["text"]
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb.active
+    # Отримуємо список учасників з PostgreSQL
+    async with dp['db'].acquire() as conn:
+        rows = await conn.fetch("SELECT telegram_id FROM participants")
     count, failed = 0, []
-    for r in ws.iter_rows(min_row=2, values_only=True):
+    for r in rows:
+        tid = r["telegram_id"]
         try:
-            await bot.send_message(r[0], msg)
+            await bot.send_message(tid, msg)
             count += 1
+            await asyncio.sleep(0.05)
         except Exception:
-            failed.append(r[0])
-    log_wb = load_workbook(LOG_FILE)
-    log_ws = log_wb.active
-    log_ws.append([datetime.now().strftime("%Y-%m-%d %H:%M"), msg, count, ", ".join(map(str, failed))])
-    log_wb.save(LOG_FILE)
-    await bot.send_message(user_id, f"✅ Розсилка: {count} успіх, {len(failed)} помилок.")
+            failed.append(tid)
+    # Логування результатів розсилки
+    await log_broadcast(dp['db'], msg, count, failed)
+    await bot.send_message(user_id, f"✅ Розсилка: {count} успішно, {len(failed)} помилок.")
 
+
+# Main
 async def main():
     pool = await asyncpg.create_pool(
         user=DATABASE_USER,
@@ -406,10 +492,26 @@ async def main():
         host=DATABASE_HOST,
         port=DATABASE_PORT
     )
+    global redis_client
+    redis_client = redis.Redis(host='localhost', port=6379, db=0)
     dp['db'] = pool
+    # Ініціалізуємо participants_set із БД для перевірки дублів
+    rows = await pool.fetch("SELECT telegram_id FROM participants")
+    for r in rows:
+        participants_set.add(r['telegram_id'])
+
     dp.include_router(router)
     scheduler.start()
     await dp.start_polling(bot)
+
+
+async def is_flooding(user_id: int, limit_seconds: int = 2) -> bool:
+    key = f"user:{user_id}:flood"
+    exists = await redis_client.exists(key)
+    if exists:
+        return True
+    await redis_client.set(key, "1", ex=limit_seconds)
+    return False
 
 if __name__ == "__main__":
     asyncio.run(main())
